@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html>
+<head>
+
+    <meta charset="utf-8">
+    <meta name="viewport" content="initial-scale=1, maximum-scale=1,user-scalable=no">
+
+    <title>AVL Lite</title>
+    <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="favicon-16x16.png">
+    <link rel="mask-icon" href="safari-pinned-tab.svg" color="#5bbad5">
+    <meta name="msapplication-TileColor" content="#603cba">
+    <meta name="theme-color" content="#ffffff">
+
+    <!-- styles -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/materialize/1.0.0-rc.2/css/materialize.min.css">
+
+    <!-- materialize -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/materialize/1.0.0-rc.2/js/materialize.min.js"></script>
+
+    <style>  
+        html,body{
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            width: 100%;
+        }           
+        .row .col{
+            padding: 1px !important;
+        } 
+        .collapsible-header{
+            display:block !important;
+        }
+        .collapsible-header > div{
+            width: 100%;
+        }
+        .units-removed-inner{
+            color:gainsboro;
+        }
+        .units-removed-outer{
+            color:blue;
+            text-decoration: line-through;
+        }
+        .call-status-a {
+            background-color: #1565c0;
+            color: white;
+        }
+        .call-status-c{
+            background-color: white;
+            color: gray;
+        }
+        .call-status-c {display:none !important;} /*Dont change this single line format*/
+        .call-low-priority-1 {display:none !important;} /*Dont change this single line format*/
+
+        @media only screen and (min-width: 1200px){
+            #mainContainer{
+                margin: 0 auto;
+                max-width: 500px;
+            }
+        }
+        .fade-in {
+            opacity: 1;
+            animation-name: fadeInOpacity;
+            animation-iteration-count: 1;
+            animation-timing-function: ease-in;
+            animation-duration: 2s;
+        }
+
+        @keyframes fadeInOpacity {
+            0% {opacity: 0; color:red;}
+            100% {opacity: 1; color: white;}
+        }
+    </style>
+
+    <script>
+        "use strict"
+
+        let _data = {
+            calls: [],
+            isEmployee: 0,
+            minCallNumber: 0,
+            maxCallNumber: 0,
+            selectedCallNumber: 0,
+            selectedCallNumberMaxCommentId: 0,
+            selectedCallNotesInterval: [],
+            showClosedCalls: false,
+            showLowPriorityCalls: false
+        }        
+
+        const init = () => {    
+            
+            setUI()
+            
+            //Authenticate, then start polling
+            const _setIsEmployee = setIsEmployee()
+
+            _setIsEmployee.then(
+                result => {                
+                    if (result == true){
+
+                        //Initial seed data (latest 100 calls (all priorities) in the last 24 hours)
+                        getCalls('seed',0,0,() => {
+                            document.getElementById("loading").style.display = "none"
+                            document.getElementById("btn_GetMoreCalls").style.display = "block"
+                        })
+                        
+                        //Poll for new calls every 10 seconds
+                        setInterval( () => {
+                            getCalls('new',_data.minCallNumber,_data.maxCallNumber)
+                        },10000)
+
+                        //Poll for updates to existing calls, every 10 seconds
+                        setInterval( () => {
+                            getCalls('updates',_data.minCallNumber,_data.maxCallNumber)
+                        },10000)
+
+                    }else{
+                        alert("Authorized Employees Only")
+                    }           
+                }
+            )
+            
+        }
+
+        const setUI = () => {
+            //Materialize Tabs
+            const _tabs = document.querySelectorAll('.tabs');
+            const _tabs_instances = M.Tabs.init(_tabs);
+        }
+        
+        const setIsEmployee = () => {
+            return new Promise((resolve,reject) => {
+                if (typeof window.localStorage.colEmail != "undefined"){
+                    _data.isEmployee = true
+                    _data.username = window.localStorage.colEmail
+
+                    let _elems = document.querySelectorAll(".username")
+                    _elems.forEach((i) => {
+                        i.innerHTML = window.localStorage.colEmail
+                    })                
+                }else{
+                    let _elems = document.querySelectorAll(".username")
+                    _elems.forEach((i)=>{
+                        i.text = "Employee Login"
+                        i.style.textDecoration = "underline"
+                        i.href='https://maps.cityoflewisville.com/oauthredirect?originalurl=' + encodeURIComponent(window.location.href)
+                    })
+                }
+                resolve(_data.isEmployee)
+                reject(new Error("error whoops"))
+            })
+        }
+
+        const postData = (url = '', data = {}) => {
+            return fetch(url, {
+                method: "POST",                                
+                body: JSON.stringify(data)
+            })
+            .then(response => response.json())
+            .catch(error => console.error(`Fetch Error =\n`, error));
+        }
+
+        const getCalls = (_queryType,_minCallNumber,_maxCallNumber,_firstRunCallback) => {
+            
+            postData('https://query.cityoflewisville.com/v2', {
+                webservice: "AVLMobileFastSeed",
+                auth_token: localStorage.colAuthToken,
+                querytype: _queryType,
+                mincallnumberinclient: (_minCallNumber || 0),
+                maxcallnumberinclient: (_maxCallNumber || 0)
+            })
+            .then(data => {
+                if (_queryType == 'seed'){
+                    _firstRunCallback()
+                }
+                //console.log("Process results: " + _queryType)
+                processCallsResults(data[0],_queryType)
+            })
+            .catch(error => 
+                console.error(error)
+            )
+        }
+
+        //Used when an update is found
+        const getCall = (_callNumber) => {
+            return postData(`https://query.cityoflewisville.com/v2`, {
+                webservice: "AVLMobileFastSeed",
+                auth_token: localStorage.colAuthToken,
+                querytype: 'single',
+                mincallnumberinclient: (_callNumber || 0),
+                maxcallnumberinclient: 0
+            })
+            .then(data => data[0])
+            .catch(error => console.error(error));
+        }
+
+        const getNotes = (_callNumber,_maxcommentid) => {
+            console.log("getNotes : " + _callNumber + " : " + _maxcommentid)
+            return postData(`https://query.cityoflewisville.com/v2`, {
+                webservice: "AVLMobileFastSeed",
+                auth_token: localStorage.colAuthToken,
+                querytype: 'notes',
+                mincallnumberinclient: (_callNumber || 0),
+                maxcallnumberinclient: (_maxcommentid || 0)
+            })
+            .then(data => 
+                processNotesResults(data[0],_callNumber)
+            )
+            .catch(error => console.error(error));
+        }
+        
+        const getMoreCalls = () => {
+            
+            //Show closed calls
+            if (_data.showClosedCalls == false){
+                let _element = document.getElementById("btn_ToggleClosed")
+                toggleClosedCallsVisibility(_element)
+            }
+
+            //Show low priority calls
+            if (_data.showLowPriorityCalls == false){
+                let _element = document.getElementById("btn_ToggleLowPriority")
+                toggleLowPriorityCallsVisibility(_element)
+            }
+            
+            getCalls("historic",_data.minCallNumber,_data.maxCallNumber)
+        }
+
+        const processNotesResults = (_results,_callNumber) => {
+            if (typeof _results[0] != 'undefined'){
+                
+                let _maxcommentid = _results[_results.length-1].commentid
+                
+                //New Note(s)
+                if (_maxcommentid > _data.selectedCallNumberMaxCommentId){
+                    _results.forEach(_r => {
+                        requestAnimationFrame( i => {
+                            let _html = document.getElementById("call_body_" + _callNumber).innerHTML
+                            document.getElementById("call_body_" + _callNumber).innerHTML = _html + '<hr>' + _r.narrative
+                        })
+                    })
+                    
+                }
+                console.log("_maxcommentid = " + _maxcommentid)
+                
+                _data.selectedCallNumberMaxCommentId = _maxcommentid
+            }
+        }
+        
+        const processCallsResults = (_results,_queryType) => {
+            if (typeof _results[0] != 'undefined'){   
+
+                switch (_queryType){
+                    case 'seed':
+                        processCalls_New(_results,_queryType)
+                        break;
+                    case 'new':
+                        processCalls_New(_results)
+                        break;
+                    case 'updates':
+                        processCalls_Updates(_results)
+                        break;
+                    case 'historic': 
+                        processCalls_Historic(_results)
+                        break;
+                    default:
+                        alert("Invalid data from server")
+                }
+                
+                updateUIAfterProcessCalls()
+            }
+        }
+
+        const processCalls_New = (_results,_queryType) => {
+            console.log("New calls(s): length=" + _results.length)
+
+            //Min and max call numbers stored on client
+            _data.minCallNumber = _results[_results.length-1].callnumber
+            _data.maxCallNumber = _results[0].callnumber
+
+            //Html from server
+            let _html = ''
+            _results.forEach(_call =>  _html += _call._html )
+
+            //Add new calls to _data.calls
+            _results.forEach(r => {
+                _data.calls.push(r)
+            })
+
+            //Append new calls to DOM
+            requestAnimationFrame( i => {
+                document.getElementById("callsContainer").innerHTML = _html + document.getElementById("callsContainer").innerHTML                
+            })
+
+            //Remove fade-in class from new calls so they don't re-animate when the innerhtml is changed
+            _results.forEach(_call => {
+                requestAnimationFrame( i => {
+                    document.getElementById("call" + '_' + _call.callnumber).classList.remove("fade-in")
+                })
+            })
+
+            //Alert user about new call
+            if (_queryType == 'new'){
+                M.toast({html:'New ' + _results[0].callnumber + ' ' + _results[0].complaint})
+            }
+        }
+
+        const processCalls_Updates = (_results) => {            
+            _data.calls.forEach(_client => {
+                
+                let _server = _results.filter(s => {
+                    //if (typeof _s != 'undefined'){
+                        return s.callnumber == _client.callnumber
+                    //}
+                })[0]
+                //console.log(_server)
+                if (typeof _server != 'undefined'){   
+                
+                    //Client checksum <> Server checksum (something new has happened server-side)        
+                    if (_client.checksum != _server.checksum){     
+                        
+                        //Get the html for this single call
+                        getCall(_client.callnumber).then( _getCallResults => {
+                            requestAnimationFrame( i => {                                        
+                                document.getElementById("call" + '_' + _client.callnumber).innerHTML = _getCallResults[0]._html
+
+                                _client.checksum = _getCallResults[0].checksum
+
+                                //Alert user of the update found
+                                M.toast({html:'Update ' + _getCallResults[0].callnumber + ' ' + _getCallResults[0].complaint,displayLength:4000})
+                                console.log("Updates found: " + _client.callnumber)
+                            })
+                        })
+
+                    }
+               }
+            })
+        }
+
+        const processCalls_Historic = (_results) => {
+            //Html from server
+            let _html = ''
+            _results.forEach(_call =>  _html += _call._html )
+
+            console.log("Historic calls: new min call number = " + _results[_results.length-1].callnumber)
+            
+            //Set the new min-callnumber value
+            _data.minCallNumber = _results[_results.length-1].callnumber
+            
+            //Add new calls to _data.calls
+            _data.calls.push(_results)
+            
+            //Append to DOM
+            requestAnimationFrame( i => {
+                document.getElementById("callsContainer").innerHTML = document.getElementById("callsContainer").innerHTML + _html
+                M.toast({html:"Retrieved " + _results.length + " calls"})
+            })
+        }
+        
+        const updateUIAfterProcessCalls = () => {
+
+            //Collapsibles
+            const elems = document.querySelector('.collapsible')
+
+            const instances = M.Collapsible.init(elems,{
+                onOpenStart: (_el) => {   
+                    let _callnumber = _el.id.replace("call_","")
+
+                    _data.selectedCallNumber = _callnumber
+
+                    requestAnimationFrame( i => {
+                        document.getElementById("call_body_" + _data.selectedCallNumber).innerHTML = ""
+                    })
+
+                    getNotes(_data.selectedCallNumber,0)
+
+                    _data.selectedCallNotesInterval = setInterval( () => {
+                        getNotes(_data.selectedCallNumber,_data.selectedCallNumberMaxCommentId)
+                    },5000)
+
+                    console.log("on open start : " + _data.selectedCallNumber)
+                },
+                onCloseStart: (_el) => {
+                    let _callnumber = _el.id.replace("call_","")
+                    
+                    requestAnimationFrame( i => {
+                        document.getElementById("call_body_" + _callnumber).innerHTML = ""
+                    })
+
+                    _data.selectedCallNumberMaxCommentId = 0       
+
+                    clearInterval(_data.selectedCallNotesInterval)
+
+                    console.log("cleared interval : " + _callnumber + " : new max comment id = " + _data.selectedCallNumberMaxCommentId)
+                }
+            })
+        }
+
+        const toggleClosedCallsVisibility = (_control) => {
+            _data.showClosedCalls = !_data.showClosedCalls
+
+            const _style = document.getElementsByTagName("style")[0]
+
+            if (_data.showClosedCalls == true){
+                _style.innerHTML = _style.innerHTML.replace(".call-status-c {display:none !important;}",".call-status-c {display:block !important;}")     
+            }else{
+                _style.innerHTML = _style.innerHTML += ".call-status-c {display:none !important;}"
+            }       
+            _control.innerText = (_control.innerText.toLowerCase() == "show closed" ? "Hide Closed" : "Show Closed")
+        }
+
+        const toggleLowPriorityCallsVisibility = (_control) => {
+            _data.showLowPriorityCalls = !_data.showLowPriorityCalls
+
+            const _style = document.getElementsByTagName("style")[0]
+
+            if (_data.showLowPriorityCalls == true){
+                _style.innerHTML = _style.innerHTML.replace(".call-low-priority-1 {display:none !important;}",".call-low-priority-1 {display:block !important;}")   
+            }else{
+                _style.innerHTML = _style.innerHTML += ".call-low-priority-1 {display:none !important;}"
+            }       
+            _control.innerText = (_control.innerText.toLowerCase() == "show low priority" ? "Hide Low Priority" : "Show Low Priority")
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            init()
+        })
+
+    </script>
+</head>
+<body>
+    <div id="mainContainer">
+
+        <!--Username-->
+        <div class="row" style="margin-bottom: 0px;">
+            <div class="col s12">
+                <a class="username grey-text lighten-5" href="http://maps.cityoflewisville.com/oauthredirect/index.html">-</a>
+            </div>
+        </div>
+
+        <!--Main Container-->
+        <div class="row">
+
+            <!--Tab Titles-->
+            <div class="col s12">                
+                <ul class="tabs">
+                    <li class="tab col s3"><a class="active" href="#Calls">Calls</a></li>
+                    <li class="tab col s3"><a href="#Map">Map</a></li>
+                    <li class="tab col s3"><a href="#Layers">Layers</a></li>
+                    <li class="tab col s3"><a href="#Settings">Settings</a></li>
+                </ul>
+            </div>
+
+            <!--Tab Body - Calls-->
+            <div id="Calls" class="col s12">
+                <!--Filter buttons-->
+                <div>
+                    <br>
+                    <a class="waves-effect waves-light btn-small" id="btn_ToggleClosed" onclick="toggleClosedCallsVisibility(this)">Show Closed</a>
+                    <a class="waves-effect waves-light btn-small" id="btn_ToggleLowPriority" onclick="toggleLowPriorityCallsVisibility(this)">Show Low Priority</a>
+                </div>
+
+                <!--List of Calls (html comes from server)-->
+                <ul id="callsContainer" class="collapsible"></ul>
+
+                <!--Loading message-->
+                <div id="loading" style="margin:0 auto; height:300px;padding:40%;"><center>Loading...</center></div>
+
+                <!--Get more calls-->
+                <a class="waves-effect waves-light btn" id="btn_GetMoreCalls" onclick="getMoreCalls()" style="display:none;">Load More Calls</a>
+
+            </div>
+
+            <!--Tab Body - Map-->
+            <div id="Units" class="col s12">
+                <!--List of Calls (html comes from server)-->
+                <ul id="unitsContainer" class="collapsible"></ul>
+
+                <!--Loading message-->
+                <div id="loading_units" style="margin:0 auto; height:300px;padding:40%;"><center>Loading...</center></div>
+            </div>
+
+            <!--Tab Body - Map Layers-->
+            <div id="Layers" class="col s12">Test 3</div>
+
+            <!--Tab Body - App Settings-->
+            <div id="Settings" class="col s12"></div>
+        </div>
+    </div>	
+</body>
+</html>
